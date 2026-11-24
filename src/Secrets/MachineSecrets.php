@@ -14,8 +14,8 @@ use Tetrix\AiBridge\Models\Connection;
 use Tetrix\AiBridge\Upstreams\UpstreamClient;
 
 /**
- * The secret store on a person's machine, managed through its bridge: list, put, describe and
- * remove (PROTOCOL.md, "Secrets on the machine"). Reached as `AiBridge::secrets()`.
+ * The secret store on a person's machine, managed through its bridge: list, put, describe,
+ * remove and set an end (PROTOCOL.md, "Secrets on the machine"). Reached as `AiBridge::secrets()`.
  *
  * Off unless the machine's operator started the bridge with `--machine-secrets`: only then does
  * its hello carry `machine_secrets`, and a bridge without it is never sent a `secret_*` frame
@@ -30,13 +30,14 @@ use Tetrix\AiBridge\Upstreams\UpstreamClient;
  *
  * Every method answers an array `{ok: bool, ...}` and never throws for a refusal. On failure
  * `code` is the machine's (`store_unavailable`, `not_found`, `invalid_name`, `invalid_request`,
- * `exists`, `timeout`, `failed`) or one decided on the way (`machine_secrets_unsupported`,
- * `machine_secrets_outdated`, `not_connected`, `unreachable`, `send_failed`). For a put, describe
- * or remove whose outcome cannot be known (`timeout`, `unreachable`, a bridge that dropped
+ * `invalid_end`, `ended`, `exists`, `timeout`, `failed`) or one decided on the way
+ * (`machine_secrets_unsupported`, `machine_secrets_outdated`, `ends_unsupported`,
+ * `not_connected`, `unreachable`, `send_failed`). For a put, describe, remove or set_end whose
+ * outcome cannot be known (`timeout`, `unreachable`, a bridge that dropped
  * after it was sent) the answer also carries `result_unknown: true`: list the secrets again
  * before retrying.
  *
- * Every put, describe and remove, whatever its outcome, fires MachineSecretChanged and writes
+ * Every put, describe, remove and set_end, whatever its outcome, fires MachineSecretChanged and writes
  * one info log line (operation, connection, name, outcome; never a value or a description), so
  * a host can keep an audit trail.
  *
@@ -71,15 +72,33 @@ class MachineSecrets
     }
 
     /**
-     * The machine's secrets: names, descriptions and when each was last updated, never a value.
+     * Whether secrets on this connection's machine can be given an end now: supported(), and the
+     * bridge announced `machine_secrets` at revision 3 or newer. A put with an end or a
+     * setEnd() to an older bridge is answered `ends_unsupported` with nothing sent.
+     */
+    public function supportsEnds(Connection $connection): bool
+    {
+        $status = $this->status->for($connection);
+
+        return $status['connected'] === true
+            && $status['machine_secrets'] === true
+            && is_int($status['machine_secrets_revision'])
+            && $status['machine_secrets_revision'] >= SecretFrames::ENDS_REVISION;
+    }
+
+    /**
+     * The machine's secrets: names, descriptions, when each was last updated and its end, never
+     * a value; plus `ended`, the ends the machine handled lately (`{name, kind, ended_at}`, the
+     * last 30 days). An expired secret is still listed, with `expired_at`; a deleted one is not.
      *
-     * @return array{ok: bool, secrets?: list<array{name: string, description: string|null, updated_at: string|null}>, code?: string, error?: string}
+     * @return array{ok: bool, secrets?: list<array{name: string, description: string|null, updated_at: string|null, ends_at: string|null, end_kind: string|null, expired_at: string|null}>, ended?: list<array{name: string, kind: string, ended_at: string|null}>, code?: string, error?: string}
      */
     public function list(Connection $connection): array
     {
         $answer = $this->call($connection, ['op' => 'list']);
         if (($answer['ok'] ?? false) === true) {
             $answer['secrets'] ??= [];
+            $answer['ended'] ??= [];
         }
 
         return $answer;
@@ -90,9 +109,14 @@ class MachineSecrets
      * bridge older than revision 2 is sent nothing (`machine_secrets_outdated`). On
      * success `replaced` says whether an existing secret was overwritten.
      *
+     * With `$endsAt` the secret ends then (`$endKind` `expire`, the default, or `delete`); it must
+     * be in the future and at most 10 years ahead (`invalid_end`), and a bridge below revision 3
+     * is sent nothing (`ends_unsupported`). Without it the secret has no end: a replace clears
+     * the old one, and an expired secret is renewed.
+     *
      * @return array{ok: bool, replaced?: bool, code?: string, error?: string, result_unknown?: true}
      */
-    public function put(Connection $connection, string $name, #[\SensitiveParameter] string $value, ?string $description = null, bool $replace = false): array
+    public function put(Connection $connection, string $name, #[\SensitiveParameter] string $value, ?string $description = null, bool $replace = false, ?\DateTimeInterface $endsAt = null, ?string $endKind = null): array
     {
         $answer = $this->call($connection, array_filter([
             'op' => 'put',
@@ -100,6 +124,8 @@ class MachineSecrets
             'description' => $description,
             'value' => $value,
             'replace' => $replace ?: null,
+            'ends_at' => self::endOf($endsAt),
+            'end_kind' => $endsAt === null ? $endKind : ($endKind ?? 'expire'),
         ], static fn ($v) => $v !== null));
 
         // Whatever the machine or anything on the way said, it does not repeat the value.
@@ -128,6 +154,33 @@ class MachineSecrets
     public function remove(Connection $connection, string $name): array
     {
         return $this->call($connection, ['op' => 'remove', 'name' => $name]);
+    }
+
+    /**
+     * Set a secret's end (`$endKind` `expire`, the default, or `delete`), or remove it with a
+     * null `$endsAt`. Leaves the value and the description alone. Refused `not_found` when the
+     * secret is absent, `ended` when it already expired (renew it with a put and `replace`),
+     * `invalid_end` for an end in the past or more than 10 years ahead, and `ends_unsupported`
+     * with nothing sent for a bridge below revision 3.
+     *
+     * @return array{ok: bool, code?: string, error?: string, result_unknown?: true}
+     */
+    public function setEnd(Connection $connection, string $name, ?\DateTimeInterface $endsAt, ?string $endKind = null): array
+    {
+        $body = ['op' => 'set_end', 'name' => $name, 'ends_at' => self::endOf($endsAt)];
+        if ($endsAt !== null) {
+            $body['end_kind'] = $endKind ?? 'expire';
+        }
+
+        return $this->call($connection, $body);
+    }
+
+    /** An end as it travels: UTC, second precision, `Z` suffix. */
+    private static function endOf(?\DateTimeInterface $endsAt): ?string
+    {
+        return $endsAt === null ? null : \DateTimeImmutable::createFromInterface($endsAt)
+            ->setTimezone(new \DateTimeZone('UTC'))
+            ->format('Y-m-d\\TH:i:s\\Z');
     }
 
     /**
@@ -163,6 +216,10 @@ class MachineSecrets
             return ['ok' => false, 'code' => 'invalid_request', 'error' => 'Only a CLI bridge connection has a machine.'];
         }
 
+        if (($refusal = $this->endsRefusal($connection, $frame)) !== null) {
+            return $refusal;
+        }
+
         $answer = $this->relay($connection->connection_key, $body, (int) config('ai-bridge.machine_secrets.timeout', 20) + 3);
 
         // A write that was sent and not answered may still have happened: the machine's command
@@ -183,6 +240,35 @@ class MachineSecrets
     }
 
     /**
+     * `ends_unsupported` before anything is sent, for an end to a connected bridge that announced
+     * revision 2 but not 3. Any other state goes on to the serve process, which decides with
+     * the live hello and answers the same code (409), or the reason the bridge cannot be used.
+     *
+     * @param  array<string, mixed>  $frame
+     * @return array{ok: false, code: string, error: string}|null
+     */
+    private function endsRefusal(Connection $connection, #[\SensitiveParameter] array $frame): ?array
+    {
+        if (! SecretFrames::needsEnds($frame)) {
+            return null;
+        }
+
+        $status = $this->status->for($connection);
+        $info = ['machine_secrets' => ['revision' => $status['machine_secrets_revision']]];
+        if ($status['connected'] !== true || $status['machine_secrets'] !== true || SecretFrames::refusalFor($info) !== null) {
+            return null;
+        }
+
+        $refusal = SecretFrames::endsRefusalFor($info, $frame);
+        if ($refusal === null) {
+            return null;
+        }
+        unset($refusal['_status']);
+
+        return $refusal;
+    }
+
+    /**
      * The audit trail of one change: MachineSecretChanged and an info log line, never the value.
      *
      * @param  array<string, mixed>  $body
@@ -194,6 +280,7 @@ class MachineSecrets
         $outcome = $ok ? 'ok' : (is_string($answer['code'] ?? null) ? $answer['code'] : 'failed');
         $name = is_string($body['name'] ?? null) ? mb_substr($body['name'], 0, 128) : '';
         $unknown = ($answer['result_unknown'] ?? null) === true;
+        $endsAt = is_string($body['ends_at'] ?? null) ? $body['ends_at'] : null;
         $replaced = $ok && ($answer['replaced'] ?? null) === true;
         $userId = self::authUserId();
         $durationMs = (int) round((microtime(true) - $started) * 1000);
@@ -210,7 +297,7 @@ class MachineSecrets
                 'result_unknown' => $unknown,
                 'replaced' => $replaced,
                 'duration_ms' => $durationMs,
-            ]);
+            ] + (array_key_exists('ends_at', $body) ? ['ends_at' => $endsAt, 'end_kind' => $endsAt === null ? null : ($body['end_kind'] ?? null)] : []));
         } catch (\Throwable) {
             // A failing log handler is not the caller's problem.
         }

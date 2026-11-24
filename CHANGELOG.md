@@ -3,6 +3,34 @@
 Release notes for earlier versions are on the GitHub releases page of
 tetrixdev/laravel-ai-bridge. This file starts with 0.16.0-RC1.
 
+## [Unreleased] — to be released as 0.28.0
+
+### Added
+
+- **Secrets with an end (`machine_secrets` revision 3).** A secret on the machine may carry an
+  end: `ends_at` (ISO 8601 UTC, second precision, `Z`) and `end_kind` (`expire`: the value is
+  removed and the entry stays listed with `expired_at`; `delete`: value and entry removed). New
+  frame `secret_set_end` (`ends_at: null` removes the end); `secret_put` takes optional
+  `ends_at`/`end_kind` (both or neither; a replace without them clears the end); a list answer's
+  rows carry `ends_at`, `end_kind` and `expired_at`, and the answer carries `ended`
+  (`{name, kind, ended_at}`). New machine codes `invalid_end` and `ended`.
+  `SecretFrames::ENDS_REVISION = 3` (`MIN_REVISION` stays 2).
+- `AiBridge::secrets()->put()` takes `?DateTimeInterface $endsAt` and `?string $endKind`
+  (`expire` by default when an end is given), sent in UTC; new `setEnd()` and `supportsEnds()`;
+  `list()` also answers `ended`. An end must be in the future and at most 10 years ahead
+  (`invalid_end`, checked before anything is sent).
+- `POST /api/secrets` accepts op `set_end`, and `ends_at`/`end_kind` on a put.
+
+### Changed
+
+- **An end never reaches a bridge that would ignore it.** A put with an end or any `set_end` to a
+  bridge below revision 3 is answered `ends_unsupported` with nothing sent: 409 from the serve
+  process (also for a frame held through a short drop when an older bridge comes back), and from
+  `AiBridge::secrets()` directly when the connection's live status already shows revision 2. A
+  set_end follows the unknown-outcome rules of the other writes (`result_unknown: true`), fires
+  `MachineSecretChanged` (operation `set_end`) and logs one line with `ends_at` and `end_kind`,
+  never a value. Additive wire fields; protocol stays 0.1.
+
 ## [0.27.1] — 2026-11-22
 
 ### Added

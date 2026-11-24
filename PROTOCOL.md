@@ -299,11 +299,12 @@ on the connection status.
 #### Additive field: `machine_secrets`
 
 ```json
-{ "type": "hello", "machine_secrets": { "revision": 2 } }
+{ "type": "hello", "machine_secrets": { "revision": 3 } }
 ```
 
 The bridge manages the machine's secret store for the app: the `secret_*` frames of
-[Secrets on the machine](#secrets-on-the-machine); `revision` versions them. A bridge sends it only
+[Secrets on the machine](#secrets-on-the-machine); `revision` versions them (2: `replace`; 3:
+a secret's end, `secret_set_end` and `ended`). A bridge sends it only
 when its operator started it with `--machine-secrets`, so it is absent both from a bridge that
 predates it and from one whose operator did not opt in. The server sends no `secret_*` frame to a
 bridge without it and answers the app `machine_secrets_unsupported`. Reported as
@@ -2088,7 +2089,7 @@ button means stay with the host.
 Off unless the machine's operator opts in. A bridge started with `--machine-secrets` (env
 `AI_BRIDGE_MACHINE_SECRETS=1`, ai-bridge 0.46.0+) announces `hello.machine_secrets`, and the app
 may then manage the bridge's secret store on the machine for the person: list it, add or replace
-a secret, change a description, remove one. The store is built into the bridge
+a secret, change a description, remove one, and give one an end (revision 3). The store is built into the bridge
 (`~/.ai-bridge/secrets`: one file per secret, mode 0600 from creation, descriptions and dates in
 `index.json`); the person on the machine uses the same store with `aib secret`. A store operation
 that has not finished after 15 s is answered `timeout`. A value only ever travels in: on
@@ -2099,9 +2100,10 @@ that has not finished after 15 s is answered `timeout`. A value only ever travel
 | Frame | Fields |
 |---|---|
 | `secret_list` | `{id}` |
-| `secret_put` | `{id, name, description?, value, replace?}` |
+| `secret_put` | `{id, name, description?, value, replace?, ends_at?, end_kind?}` |
 | `secret_describe` | `{id, name, description}` |
 | `secret_remove` | `{id, name}` |
+| `secret_set_end` | `{id, name, ends_at, end_kind?}` (revision 3) |
 
 - `name`: 1 to 64 characters `[A-Za-z0-9._-]`, starting with a letter or digit, never `..`, no
   trailing newline, never `index.json` in any case (the package matches
@@ -2115,12 +2117,46 @@ that has not finished after 15 s is answered `timeout`. A value only ever travel
   existing name is refused with `exists`. Revision 1 was an unreleased draft that overwrote
   without saying so: the server sends no `secret_*` frame to a bridge below revision 2
   (`machine_secrets_outdated`).
+- `ends_at`, `end_kind` (revision 3): the secret's end. `ends_at` is an ISO 8601 UTC time with
+  second precision and a `Z` suffix (`2026-12-01T15:00:00Z`), after now and at most 10 years
+  ahead; `end_kind` is `expire` or `delete`. On `secret_put` both or neither: without them the
+  put sets no end, and a replace without them clears any end (and renews an expired secret). On
+  `secret_set_end`, `ends_at: null` removes the end (`end_kind` is then omitted); it never touches
+  the value or the description, and is refused `not_found` for an absent secret and `ended` for
+  one that already expired. The server sends no `secret_put` with an end and no
+  `secret_set_end` to a bridge below revision 3 (`ends_unsupported`): it would keep the secret
+  forever.
+
+```json
+{"type": "secret_put", "id": "sec-…", "name": "rpa-pass", "value": "…", "replace": false, "ends_at": "2026-11-24T17:00:00Z", "end_kind": "delete"}
+{"type": "secret_set_end", "id": "sec-…", "name": "openai-key", "ends_at": "2026-12-01T15:00:00Z", "end_kind": "expire"}
+{"type": "secret_set_end", "id": "sec-…", "name": "openai-key", "ends_at": null}
+```
+
+At `ends_at` the bridge ends the secret, checking before every read of its store, at start and
+every 60 s: `expire` removes the value and keeps the entry with `expired_at` (equal to
+`ends_at`), so it is still listed and can never be used again until a put with `replace`
+renews it; `delete` removes the value and the entry. Every end handled is recorded as
+`{name, kind, ended_at}` (`ended_at` equal to `ends_at`), for 30 days and at most 100 records.
 
 ### Bridge → Server: `secret_result`
 
-Exactly one per request, with its `id`: `{id, ok, secrets?, replaced?, code?, error?}`.
-`secrets` (on `secret_list`) is `[{name, description|null, updated_at|null}]`; `replaced` (on a
-successful `secret_put`, revision 2) says whether an existing secret was overwritten. Codes:
+Exactly one per request, with its `id`: `{id, ok, secrets?, ended?, replaced?, code?, error?}`.
+`secrets` (on `secret_list`) is `[{name, description|null, updated_at|null, ends_at|null,
+end_kind|null, expired_at|null}]` (the end fields from revision 3); `ended` (on `secret_list`,
+revision 3) is `[{name, kind, ended_at}]`; `replaced` (on a successful `secret_put`, revision 2)
+says whether an existing secret was overwritten. The server keeps only these fields, drops a row
+with a bad name (and an `ended` record with an unknown `kind`), and nulls an end that is not a
+whole pair.
+
+```json
+{"type": "secret_result", "id": "sec-…", "ok": true, "secrets": [
+  {"name": "github-token", "description": "…", "updated_at": "…", "ends_at": null, "end_kind": null, "expired_at": null},
+  {"name": "openai-key", "description": "…", "updated_at": "…", "ends_at": "2026-12-01T15:00:00Z", "end_kind": "expire", "expired_at": "2026-12-01T15:00:00Z"}
+], "ended": [{"name": "rpa-pass", "kind": "delete", "ended_at": "2026-11-24T17:00:00Z"}]}
+```
+
+Codes:
 
 | Code | Meaning |
 |---|---|
@@ -2128,17 +2164,22 @@ successful `secret_put`, revision 2) says whether an existing secret was overwri
 | `not_found` | No secret of that name |
 | `exists` | `secret_put` without `replace` for a name that exists |
 | `invalid_name` / `invalid_request` | The bridge refused the name or the request |
+| `invalid_end` | The end is malformed, not in the future, or more than 10 years ahead (revision 3) |
+| `ended` | `secret_set_end` on a secret that already expired (revision 3) |
 | `timeout` | The store did not finish within the bridge's 15 s: the result is unknown, list the secrets again before retrying |
 | `failed` | Anything else (the server maps an unknown code to this) |
 
 ### The serve process and the PHP API
 
-`POST /api/secrets` (internal API, relay token) takes `{op: list|put|describe|remove, name?,
-description?, value?, replace?}`, checks it with the rules above (400 `invalid_name` /
-`invalid_request`), sends the frame and answers with the `secret_result`. Without
-`hello.machine_secrets`: 409 `machine_secrets_unsupported`; a bridge below revision 2 (or without
-one): 409 `machine_secrets_outdated`; nothing is sent in either case. No answer within
-`ai-bridge.machine_secrets.timeout` (20 s): 504 `timeout`. A put, describe or remove that was sent
+`POST /api/secrets` (internal API, relay token) takes `{op: list|put|describe|remove|set_end,
+name?, description?, value?, replace?, ends_at?, end_kind?}`, checks it with the rules above (400
+`invalid_name` / `invalid_request` / `invalid_end`), sends the frame and answers with the
+`secret_result`. Without `hello.machine_secrets`: 409 `machine_secrets_unsupported`; a bridge
+below revision 2 (or without one): 409 `machine_secrets_outdated`; a put with an end or a
+`set_end` to a bridge below revision 3: 409 `ends_unsupported`; nothing is sent in any of these
+cases, and a frame held through a short drop is checked the same way against the bridge that
+comes back. No answer within
+`ai-bridge.machine_secrets.timeout` (20 s): 504 `timeout`. A put, describe, remove or set_end that was sent
 and not answered (504, or the bridge dropped: 404 `not_connected`) carries `result_unknown: true`;
 the bridge's own `timeout` is passed on as a 200 `secret_result`, which `AiBridge::secrets()` marks
 `result_unknown: true` for a write.
@@ -2146,7 +2187,11 @@ the bridge's own `timeout` is passed on as a 200 `secret_result`, which `AiBridg
 `AiBridge::secrets()` (`Secrets\MachineSecrets`), for a `Connection` the caller already resolved
 through its own scope: `supported($connection)`, `list($connection)`,
 `put($connection, $name, $value, $description = null, $replace = false)`,
-`describe($connection, $name, $description)`, `remove($connection, $name)`. Each answers
+`describe($connection, $name, $description)`, `remove($connection, $name)`, and from revision 3
+`supportsEnds($connection)`, `put(..., ?\DateTimeInterface $endsAt = null, ?string $endKind = null)`
+and `setEnd($connection, $name, ?\DateTimeInterface $endsAt, ?string $endKind = null)` (the end
+sent in UTC, `$endKind` `expire` by default). A put with an end or a `setEnd()` for a connected
+bridge below revision 3 is answered `ends_unsupported` without anything being sent. Each answers
 `{ok, ...}` and never throws for a refusal; a write whose outcome cannot be known (`timeout`,
 `unreachable`, a drop after sending) carries `result_unknown: true`.
 
