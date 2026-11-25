@@ -157,10 +157,13 @@ final class SecretRequest
             if (! array_key_exists('ends_at', $body)) {
                 return $refused('set_end needs ends_at: a time, or null to remove the end.');
             }
+            if (($body['ends_at'] === null) !== (($body['end_kind'] ?? null) === null)) {
+                return $refused('ends_at and end_kind go together: give both or neither.', 'invalid_end');
+            }
             if ($body['ends_at'] === null) {
                 return ['type' => MessageTypes::SECRET_SET_END, 'name' => $name, 'ends_at' => null];
             }
-            if (($refusal = self::endRefusal($body['ends_at']) ?? self::endKindRefusal($body['end_kind'] ?? null)) !== null) {
+            if (($refusal = self::endRefusal($body['ends_at']) ?? self::endKindRefusal($body['end_kind'])) !== null) {
                 return $refused($refusal, 'invalid_end');
             }
 

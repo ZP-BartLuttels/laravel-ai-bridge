@@ -136,7 +136,7 @@ A bridge that sends `capabilities.reliable_delivery: true` in `hello` keeps its 
   - a `usage_request` or `turn_input` asked during the drop is held; one already out when the connection dropped is sent again after the reconnect while its caller still waits (the bridge takes a `message_id` once, so a message is never written twice);
   - an `mcp_request`, `upstream_auth_start` or `upstream_auth_code` asked during the drop is held; one already out when the connection dropped fails at once with `not_connected`, because it may have run and is not safe to run twice;
   - a file hand-over carries on: its bytes travel on their own HTTP connection, so an upload or download in progress is not ended by the drop, and an `upload_offer`, `file_read` or `upload_sent` due during the drop is held. A transfer that fails while its frame is held (the browser went away, a clock ran out) drops that frame: the machine is never sent it, nor an `upload_abort` / `file_read_cancel` for it;
-  - a held frame goes only to a bridge that can handle it. It is sent after the reconnect only when the `hello` of the bridge that came back announced what it needs: `file_uploads` for `upload_offer` / `upload_sent`, `file_downloads` for `file_read`, `turn_input` for `turn_input`, `mcp_apps` for `mcp_request`, `mcp_upstream_auth` for a sign-in step, `machine_secrets` at revision 2 or newer for a `secret_*` frame (a `usage_request` needs nothing). When an older bridge takes the machine's place without it, the frame is dropped unsent and its caller answered at once: a transfer with 409 `unsupported`, a `turn_input` with `send_failed` (`no_answer` when it went out before the drop), an exchange with 409 `<needs>_unsupported` (a `secret_*` frame to a bridge below revision 2: 409 `machine_secrets_outdated`, from 0.27.1);
+  - a held frame goes only to a bridge that can handle it. It is sent after the reconnect only when the `hello` of the bridge that came back announced what it needs: `file_uploads` for `upload_offer` / `upload_sent`, `file_downloads` for `file_read`, `turn_input` for `turn_input`, `mcp_apps` for `mcp_request`, `mcp_upstream_auth` for a sign-in step, `machine_secrets` at revision 2 or newer for a `secret_*` frame, and at revision 3 or newer for a `secret_put` with an end or a `secret_set_end` (a `usage_request` needs nothing). When an older bridge takes the machine's place without it, the frame is dropped unsent and its caller answered at once: a transfer with 409 `unsupported`, a `turn_input` with `send_failed` (`no_answer` when it went out before the drop), an exchange with 409 `<needs>_unsupported` (a `secret_*` frame to a bridge below revision 2: 409 `machine_secrets_outdated`, from 0.27.1; a `secret_put` with an end or a `secret_set_end` to a bridge below revision 3: 409 `ends_unsupported`);
   - when the grace period ends without the machine, all of it fails as it would have at the drop: usage with `not_connected`, an exchange with its `not_connected` answer, a transfer with `machine_gone`, and a `turn_input` with the new reason `connection_lost` (its turn has ended too; the caller must not count the message as delivered). A bridge without `reliable_delivery` still fails all of it at once, a `turn_input` with `no_answer`.
 
 ---
@@ -2103,7 +2103,7 @@ that has not finished after 15 s is answered `timeout`. A value only ever travel
 | `secret_put` | `{id, name, description?, value, replace?, ends_at?, end_kind?}` |
 | `secret_describe` | `{id, name, description}` |
 | `secret_remove` | `{id, name}` |
-| `secret_set_end` | `{id, name, ends_at, end_kind?}` (revision 3) |
+| `secret_set_end` | `{id, name, ends_at, end_kind?}` (revision 3; `end_kind` required when `ends_at` is a time, omitted with `ends_at: null`) |
 
 - `name`: 1 to 64 characters `[A-Za-z0-9._-]`, starting with a letter or digit, never `..`, no
   trailing newline, never `index.json` in any case (the package matches
@@ -2120,7 +2120,11 @@ that has not finished after 15 s is answered `timeout`. A value only ever travel
 - `ends_at`, `end_kind` (revision 3): the secret's end. `ends_at` is an ISO 8601 UTC time with
   second precision and a `Z` suffix (`2026-12-01T15:00:00Z`), after now and at most 10 years
   ahead; `end_kind` is `expire` or `delete`. On `secret_put` both or neither: without them the
-  put sets no end, and a replace without them clears any end (and renews an expired secret). On
+  put sets no end, and a replace without them clears any end (and renews an expired secret).
+  **A replace does not keep the old end:** a caller that replaces a value and wants the secret to
+  keep its end must send that end again on the `secret_put` (a web form prefills and resends it).
+  The bridge's own `aib secret add --replace` keeps the end on the machine's side; that is local
+  to the command line and does not change this frame. On
   `secret_set_end`, `ends_at: null` removes the end (`end_kind` is then omitted); it never touches
   the value or the description, and is refused `not_found` for an absent secret and `ended` for
   one that already expired. The server sends no `secret_put` with an end and no
@@ -2431,7 +2435,7 @@ Treating the first `result` as terminal is what this replaces, and it was not a 
 | `file_read` / `file_read_cancel` | Asking for a file the machine recorded |
 | `mcp_request` | A view's `resources/read` or `tools/call` for an upstream (needs `hello.mcp_apps`) |
 | `upstream_auth_start` / `upstream_auth_code` / `upstream_auth_forget` | Upstream OAuth sign-in (needs `hello.mcp_upstream_auth`) |
-| `secret_list` / `secret_put` / `secret_describe` / `secret_remove` | Manage the machine's secret store (needs `hello.machine_secrets`) |
+| `secret_list` / `secret_put` / `secret_describe` / `secret_remove` / `secret_set_end` | Manage the machine's secret store (needs `hello.machine_secrets`; `secret_set_end` and a `secret_put` with an end need revision 3) |
 
 ---
 
@@ -2482,7 +2486,7 @@ The protocol version is exchanged during handshake (`hello.version`). The server
 
 **Upstream MCP Apps and sign-in do not bump the version.** `hello.mcp_upstream_auth`, `welcome.upstream_oauth`, `tool_result.ui.server`, `mcp_request` / `mcp_result` and the `upstream_*` frames are additive; a server sends none of its frames to a bridge that did not announce the matching hello field, and an older bridge ignores `welcome.upstream_oauth`.
 
-**Machine secrets do not bump the version.** `hello.machine_secrets`, the four `secret_*` frames and `secret_result` are additive; their shape is versioned by `hello.machine_secrets.revision`, and a server sends none of them to a bridge without the field.
+**Machine secrets do not bump the version.** `hello.machine_secrets`, the five `secret_*` frames and `secret_result` are additive; their shape is versioned by `hello.machine_secrets.revision`, and a server sends none of them to a bridge without the field.
 
 **The larger prompt cap does not bump the version.** `hello.bridge_prompt_max_bytes` is additive; a server keeps `bridge_prompt.text` within 8 KB for a bridge without it.
 

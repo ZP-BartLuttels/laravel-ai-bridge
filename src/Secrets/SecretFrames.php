@@ -168,7 +168,7 @@ final class SecretFrames
             'ok' => false,
             'code' => $code,
             'error' => match (true) {
-                // Stopped before it finished: a put, describe or remove may have happened.
+                // Stopped before it finished: a put, describe, remove or set_end may have happened.
                 $code === 'timeout' => 'The machine\'s secret store did not finish in time, so the result is unknown: list the secrets again before retrying.',
                 is_string($error) && $error !== '' && mb_check_encoding($error, 'UTF-8') => mb_substr($error, 0, 500),
                 default => 'The machine could not do this.',

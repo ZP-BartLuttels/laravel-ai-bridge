@@ -308,7 +308,7 @@ final class MessageTypes
      * person; a value only ever travels in, on `secret_put`. See Secrets\MachineSecrets.
      */
 
-    /** Server → bridge: list the machine's secrets (names, descriptions, when updated). */
+    /** Server → bridge: list the machine's secrets (names, descriptions, when updated, ends; revision 3 adds what ended). */
     public const SECRET_LIST = 'secret_list';
 
     /** Server → bridge: add a secret, or replace one with `replace: true` (revision 2), optionally with an end (revision 3). */

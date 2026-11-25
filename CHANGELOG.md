@@ -19,7 +19,10 @@ tetrixdev/laravel-ai-bridge. This file starts with 0.16.0-RC1.
   (`expire` by default when an end is given), sent in UTC; new `setEnd()` and `supportsEnds()`;
   `list()` also answers `ended`. An end must be in the future and at most 10 years ahead
   (`invalid_end`, checked before anything is sent).
-- `POST /api/secrets` accepts op `set_end`, and `ends_at`/`end_kind` on a put.
+- `POST /api/secrets` accepts op `set_end`, and `ends_at`/`end_kind` on a put. A kind without an
+  end is refused `invalid_end` on both (`set_end` with `ends_at: null` takes no `end_kind`).
+- `MachineSecretChanged` gains `endsAt` and `endKind` (optional constructor arguments, null by
+  default): the end asked for on a put or set_end, null when none was sent.
 
 ### Changed
 
@@ -29,7 +32,8 @@ tetrixdev/laravel-ai-bridge. This file starts with 0.16.0-RC1.
   `AiBridge::secrets()` directly when the connection's live status already shows revision 2. A
   set_end follows the unknown-outcome rules of the other writes (`result_unknown: true`), fires
   `MachineSecretChanged` (operation `set_end`) and logs one line with `ends_at` and `end_kind`,
-  never a value. Additive wire fields; protocol stays 0.1.
+  never a value. Every put and set_end now logs `ends_at` and `end_kind`, null when it sets no
+  end, so a replace that clears an end is visible in the log. Additive wire fields; protocol stays 0.1.
 
 ## [0.27.1] — 2026-11-22
 

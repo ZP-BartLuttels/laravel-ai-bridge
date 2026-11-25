@@ -554,13 +554,13 @@ describe('POST /api/secrets with an end', function () {
             ->and(implode("\n", $rig->logs))->not->toContain(SECRET_VALUE);
     });
 
-    it('sends set_end as the machine expects it, and a null end without a kind', function () {
+    it('sends set_end as the machine expects it, and a null end alone', function () {
         $rig = secretsRig();
         $rig->answer = fn (array $f) => ($rig->from)('conn-r3', ['type' => MessageTypes::SECRET_RESULT, 'id' => $f['id'], 'ok' => true]);
         $end = secretEnd();
 
         $set = secretsPost($rig, '/api/secrets', ['op' => 'set_end', 'name' => 'openai-key', 'ends_at' => $end, 'end_kind' => 'expire'], 'key-r3');
-        $cleared = secretsPost($rig, '/api/secrets', ['op' => 'set_end', 'name' => 'openai-key', 'ends_at' => null, 'end_kind' => 'delete'], 'key-r3');
+        $cleared = secretsPost($rig, '/api/secrets', ['op' => 'set_end', 'name' => 'openai-key', 'ends_at' => null], 'key-r3');
 
         expect(array_map(fn ($f) => array_diff_key($f, ['id' => 1]), $rig->sent))->toBe([
             ['type' => MessageTypes::SECRET_SET_END, 'name' => 'openai-key', 'ends_at' => $end, 'end_kind' => 'expire'],
@@ -644,6 +644,7 @@ describe('POST /api/secrets with an end', function () {
             ['name' => 'github-token', 'description' => 'CI', 'updated_at' => '2026-11-20T10:00:00Z', 'ends_at' => null, 'end_kind' => null, 'expired_at' => null],
             ['name' => 'openai-key', 'description' => null, 'updated_at' => '2026-11-20T10:00:00Z', 'ends_at' => '2026-12-01T15:00:00Z', 'end_kind' => 'expire', 'expired_at' => '2026-12-01T15:00:00Z', 'value' => 'leaked?'],
             ['name' => 'half', 'ends_at' => '2026-12-01T15:00:00Z', 'end_kind' => 'vanish'],
+            ['name' => 'garbled', 'ends_at' => ['next friday'], 'end_kind' => 'expire', 'expired_at' => 42],
         ], 'ended' => [
             ['name' => 'rpa-pass', 'kind' => 'delete', 'ended_at' => '2026-11-24T17:00:00Z', 'value' => 'leaked?'],
             ['name' => 'old', 'kind' => 'shred', 'ended_at' => '2026-11-24T17:00:00Z'],
@@ -657,6 +658,7 @@ describe('POST /api/secrets with an end', function () {
             ['name' => 'github-token', 'description' => 'CI', 'updated_at' => '2026-11-20T10:00:00Z', 'ends_at' => null, 'end_kind' => null, 'expired_at' => null],
             ['name' => 'openai-key', 'description' => null, 'updated_at' => '2026-11-20T10:00:00Z', 'ends_at' => '2026-12-01T15:00:00Z', 'end_kind' => 'expire', 'expired_at' => '2026-12-01T15:00:00Z'],
             ['name' => 'half', 'description' => null, 'updated_at' => null, 'ends_at' => null, 'end_kind' => null, 'expired_at' => null],
+            ['name' => 'garbled', 'description' => null, 'updated_at' => null, 'ends_at' => null, 'end_kind' => null, 'expired_at' => null],
         ], 'ended' => [
             ['name' => 'rpa-pass', 'kind' => 'delete', 'ended_at' => '2026-11-24T17:00:00Z'],
         ]])
@@ -689,6 +691,7 @@ describe('POST /api/secrets with an end', function () {
         'a kind without an end' => [['op' => 'put', 'name' => 'stripe', 'value' => SECRET_VALUE, 'end_kind' => 'delete'], 'invalid_end'],
         'an unknown kind' => [['op' => 'put', 'name' => 'stripe', 'value' => SECRET_VALUE, 'ends_at' => secretEnd(), 'end_kind' => 'shred'], 'invalid_end'],
         'set_end without a kind' => [['op' => 'set_end', 'name' => 'stripe', 'ends_at' => secretEnd()], 'invalid_end'],
+        'set_end to none with a kind' => [['op' => 'set_end', 'name' => 'stripe', 'ends_at' => null, 'end_kind' => 'delete'], 'invalid_end'],
         'set_end without ends_at' => [['op' => 'set_end', 'name' => 'stripe'], 'invalid_request'],
         'set_end with a bad name' => [['op' => 'set_end', 'name' => 'a/b', 'ends_at' => null], 'invalid_name'],
     ]);
@@ -756,7 +759,7 @@ describe('AiBridge::secrets() with an end', function () {
 
         expect(AiBridge::secrets()->setEnd($this->connection, 'openai-key', $end, 'delete'))->toBe(['ok' => true])
             ->and(AiBridge::secrets()->setEnd($this->connection, 'openai-key', $end))->toBe(['ok' => true])
-            ->and(AiBridge::secrets()->setEnd($this->connection, 'openai-key', null, 'delete'))->toBe(['ok' => true]);
+            ->and(AiBridge::secrets()->setEnd($this->connection, 'openai-key', null))->toBe(['ok' => true]);
 
         $bodies = [];
         Http::assertSent(function (HttpRequest $r) use (&$bodies) {
@@ -800,9 +803,15 @@ describe('AiBridge::secrets() with an end', function () {
             ->and($events)->toBe([['put', 'ends_unsupported', false], ['set_end', 'ends_unsupported', false], ['put', 'ok', false]])
             ->and(json_encode($put))->not->toContain(SECRET_VALUE)
             ->and(implode("\n", $logs))->not->toContain(SECRET_VALUE);
-        Http::assertSentCount(3);
-        Http::assertSent(fn (HttpRequest $r) => str_ends_with($r->url(), '/api/secrets') && ! array_key_exists('ends_at', $r->data()));
-        Http::assertNotSent(fn (HttpRequest $r) => str_ends_with($r->url(), '/api/secrets') && array_key_exists('ends_at', $r->data()));
+        $secretRequests = [];
+        Http::assertSent(function (HttpRequest $r) use (&$secretRequests) {
+            if (str_ends_with($r->url(), '/api/secrets')) {
+                $secretRequests[] = $r->data();
+            }
+
+            return true;
+        });
+        expect($secretRequests)->toBe([['op' => 'put', 'name' => 'stripe', 'value' => SECRET_VALUE, 'replace' => true]]);
     });
 
     it('leaves an end to a bridge it cannot see to the serve process, and passes its ends_unsupported on', function () {
@@ -845,6 +854,51 @@ describe('AiBridge::secrets() with an end', function () {
             ->and($logs[1])->toContain('"ends_at":null')->toContain('"end_kind":null');
     });
 
+    it('audits a put with its end, and a replace without one as clearing it', function () {
+        Http::fake(['*/api/status' => Http::response(['connected' => false]), '*/api/secrets' => Http::response(['ok' => true, 'replaced' => true])]);
+        $logs = [];
+        Log::listen(function (MessageLogged $e) use (&$logs) {
+            $logs[] = $e->message.' '.json_encode($e->context);
+        });
+        $end = new DateTimeImmutable('@'.(time() + 7200));
+
+        AiBridge::secrets()->put($this->connection, 'rpa-pass', SECRET_VALUE, endsAt: $end, endKind: 'delete');
+        AiBridge::secrets()->put($this->connection, 'rpa-pass', SECRET_VALUE, replace: true);
+        AiBridge::secrets()->describe($this->connection, 'rpa-pass', 'RPA');
+
+        $logs = array_values(array_filter($logs, fn ($l) => str_starts_with($l, 'AI Bridge: machine secret ')));
+        expect($logs[0])->toStartWith('AI Bridge: machine secret put')
+            ->toContain('"ends_at":"'.$end->format('Y-m-d\TH:i:s\Z').'"')
+            ->toContain('"end_kind":"delete"')
+            ->and($logs[1])->toContain('"replaced":true')->toContain('"ends_at":null')->toContain('"end_kind":null')
+            ->and($logs[2])->not->toContain('ends_at')
+            ->and(implode("\n", $logs))->not->toContain(SECRET_VALUE);
+    });
+
+    it('carries the end asked for on MachineSecretChanged, null when none was sent', function () {
+        Http::fake(['*/api/status' => Http::response(['connected' => false]), '*/api/secrets' => Http::response(['ok' => true])]);
+        $events = [];
+        Event::listen(MachineSecretChanged::class, function (MachineSecretChanged $e) use (&$events) {
+            $events[] = [$e->operation, $e->endsAt, $e->endKind];
+        });
+        $end = new DateTimeImmutable('@'.(time() + 7200));
+        $wire = $end->format('Y-m-d\TH:i:s\Z');
+
+        AiBridge::secrets()->put($this->connection, 'rpa-pass', SECRET_VALUE, endsAt: $end, endKind: 'delete');
+        AiBridge::secrets()->put($this->connection, 'rpa-pass', SECRET_VALUE, replace: true);
+        AiBridge::secrets()->setEnd($this->connection, 'rpa-pass', $end);
+        AiBridge::secrets()->setEnd($this->connection, 'rpa-pass', null);
+        AiBridge::secrets()->remove($this->connection, 'rpa-pass');
+
+        expect($events)->toBe([
+            ['put', $wire, 'delete'],
+            ['put', null, null],
+            ['set_end', $wire, 'expire'],
+            ['set_end', null, null],
+            ['remove', null, null],
+        ]);
+    });
+
     it('marks a set_end whose outcome cannot be known as unknown', function () {
         Http::fake(['*/api/status' => Http::response(['connected' => false]), '*/api/secrets' => Http::sequence()
             ->push(['ok' => false, 'code' => 'timeout', 'error' => 'The machine did not answer in time.'], 504)]);
@@ -865,7 +919,9 @@ describe('AiBridge::secrets() with an end', function () {
         expect(AiBridge::secrets()->put($this->connection, 'stripe', SECRET_VALUE, endsAt: new DateTimeImmutable('-1 minute'))['code'])->toBe('invalid_end')
             ->and(AiBridge::secrets()->put($this->connection, 'stripe', SECRET_VALUE, endKind: 'delete')['code'])->toBe('invalid_end')
             ->and(AiBridge::secrets()->setEnd($this->connection, 'stripe', new DateTimeImmutable('+1 hour'), 'shred')['code'])->toBe('invalid_end')
-            ->and(AiBridge::secrets()->setEnd($this->connection, 'stripe', new DateTimeImmutable('+11 years'))['code'])->toBe('invalid_end');
+            ->and(AiBridge::secrets()->setEnd($this->connection, 'stripe', new DateTimeImmutable('+11 years'))['code'])->toBe('invalid_end')
+            ->and(AiBridge::secrets()->setEnd($this->connection, 'stripe', null, 'delete'))->toMatchArray(['code' => 'invalid_end', 'error' => 'ends_at and end_kind go together: give both or neither.'])
+            ->and(AiBridge::secrets()->put($this->connection, 'stripe', SECRET_VALUE, endKind: 'delete')['error'])->toBe('ends_at and end_kind go together: give both or neither.');
         Http::assertNothingSent();
     });
 

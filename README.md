@@ -1335,7 +1335,8 @@ $secrets = AiBridge::secrets();
 
 if ($secrets->supported($connection)) {
     $secrets->list($connection);
-    // ['ok' => true, 'secrets' => [['name' => 'stripe', 'description' => 'Live key', 'updated_at' => '2026-11-20T10:00:00Z']]]
+    // ['ok' => true, 'secrets' => [['name' => 'stripe', 'description' => 'Live key', 'updated_at' => '2026-11-20T10:00:00Z',
+    //   'ends_at' => null, 'end_kind' => null, 'expired_at' => null]], 'ended' => []]
 
     $secrets->put($connection, 'stripe', $value, 'Live key');          // ['ok' => false, 'code' => 'exists', ...] if it exists
     $secrets->put($connection, 'stripe', $value, replace: true);       // ['ok' => true, 'replaced' => true]
@@ -1344,8 +1345,8 @@ if ($secrets->supported($connection)) {
 }
 
 if ($secrets->supportsEnds($connection)) {
-    // Gone entirely at 17:00 today (Amsterdam time), sent as UTC: 2026-11-24T16:00:00Z.
-    $secrets->put($connection, 'rpa-pass', $value, endsAt: new DateTimeImmutable('today 17:00', new DateTimeZone('Europe/Amsterdam')), endKind: 'delete');
+    // Gone entirely one hour from now, sent as UTC (for example 2026-11-24T16:00:00Z).
+    $secrets->put($connection, 'rpa-pass', $value, endsAt: new DateTimeImmutable('+1 hour'), endKind: 'delete');
     // Unusable from 1 December, still listed with expired_at (expire is the default kind).
     $secrets->setEnd($connection, 'openai-key', new DateTimeImmutable('2026-12-01T15:00:00Z'));
     $secrets->setEnd($connection, 'openai-key', null);                // no end any more
@@ -1374,7 +1375,8 @@ if ($secrets->supportsEnds($connection)) {
   and `replace: true`) or `delete` (value and entry removed). The end is sent in UTC with second
   precision, must be in the future and at most 10 years ahead (`invalid_end`, checked here and on
   the machine); `setEnd(..., null)` removes it, and a put without an end sets none (a replace
-  clears the old one). `setEnd()` on an expired secret is refused `ended`. `list()` also answers
+  clears the old one, so send the end again to keep it). `setEnd()` on an expired secret is
+  refused `ended`; a kind without an end is refused `invalid_end` on both. `list()` also answers
   `ended`: the ends the machine handled in the last 30 days (`{name, kind, ended_at}`). Check
   `supportsEnds()` first: a put with an end or a `setEnd()` to an older bridge is answered
   `ends_unsupported` and nothing is sent, so the secret never silently outlives its end.
@@ -1390,14 +1392,16 @@ if ($secrets->supportsEnds($connection)) {
   process cannot be reached; a call made while the machine is off or unreachable is answered at
   once with the reason. It is false during a short drop of a `reliable_delivery` bridge too, but
   a call made then is held: it is sent after the reconnect only if the bridge that comes back
-  still announces revision 2 or newer, and otherwise answered 409
-  (`machine_secrets_unsupported` or `machine_secrets_outdated`) with nothing sent.
+  still announces revision 2 or newer (revision 3 for a put with an end or a set_end), and
+  otherwise answered 409 (`machine_secrets_unsupported`, `machine_secrets_outdated` or
+  `ends_unsupported`) with nothing sent.
 - **Audit trail.** Every `put()`, `describe()`, `remove()` and `setEnd()`, whatever its outcome, fires
   `Tetrix\AiBridge\Events\MachineSecretChanged` (user, connection, operation, name, outcome,
-  `resultUnknown`, `replaced`, duration) and writes one info log line `AI Bridge: machine secret
+  `resultUnknown`, `replaced`, duration, and `endsAt` / `endKind`: the end asked for on a put or
+  set_end, null when none was sent) and writes one info log line `AI Bridge: machine secret
   <op>` with the same fields (`operation`, `connection_id`, `user_id`, `name`, `outcome`,
-  `result_unknown`, `replaced`, `duration_ms`, plus `ends_at` and `end_kind` for a write that
-  carries an end). Neither carries the value or the description. Fired in the process
+  `result_unknown`, `replaced`, `duration_ms`, plus `ends_at` and `end_kind` for every put and
+  set_end, null when it sets no end, so a replace that clears an end shows). Neither carries the value or the description. Fired in the process
   that called `AiBridge::secrets()`, with `auth()->id()` there (null in a job or command); listen
   to it to keep your own record of who changed which machine's secrets.
 - `ConnectionStatus::for()` and `GET /ai-bridge/connections` report `machine_secrets` (as the

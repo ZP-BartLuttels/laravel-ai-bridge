@@ -18,7 +18,9 @@ use Illuminate\Foundation\Events\Dispatchable;
  * `unreachable`, `send_failed`). With
  * `$resultUnknown` the change may or may not have happened. `$replaced` is true for a put that
  * overwrote an existing secret. A request refused before anything was sent (`invalid_*` from the
- * checks here) fires too, so a trail also shows what was attempted.
+ * checks here) fires too, so a trail also shows what was attempted. `$endsAt` and `$endKind` are
+ * the end asked for on a put or set_end (ISO 8601 UTC, `expire` or `delete`); both are null for
+ * a describe or remove, and for a put or set_end without an end, which leaves the secret with none.
  *
  * Fired in the process that called AiBridge::secrets(), after the answer; `$userId` is the
  * signed-in user there, or null (a queued job, a console command).
@@ -37,5 +39,7 @@ class MachineSecretChanged
         public readonly bool $resultUnknown,
         public readonly bool $replaced,
         public readonly int $durationMs,
+        public readonly ?string $endsAt = null,
+        public readonly ?string $endKind = null,
     ) {}
 }

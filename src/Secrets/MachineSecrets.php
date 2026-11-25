@@ -11,6 +11,7 @@ use Tetrix\AiBridge\Auth\TokenManager;
 use Tetrix\AiBridge\Connections\ConnectionStatus;
 use Tetrix\AiBridge\Events\MachineSecretChanged;
 use Tetrix\AiBridge\Models\Connection;
+use Tetrix\AiBridge\Protocol\MessageTypes;
 use Tetrix\AiBridge\Upstreams\UpstreamClient;
 
 /**
@@ -79,11 +80,12 @@ class MachineSecrets
     public function supportsEnds(Connection $connection): bool
     {
         $status = $this->status->for($connection);
+        $info = ['machine_secrets' => ['revision' => $status['machine_secrets_revision']]];
 
         return $status['connected'] === true
             && $status['machine_secrets'] === true
-            && is_int($status['machine_secrets_revision'])
-            && $status['machine_secrets_revision'] >= SecretFrames::ENDS_REVISION;
+            && SecretFrames::refusalFor($info) === null
+            && SecretFrames::endsRefusalFor($info, ['type' => MessageTypes::SECRET_SET_END]) === null;
     }
 
     /**
@@ -158,7 +160,8 @@ class MachineSecrets
 
     /**
      * Set a secret's end (`$endKind` `expire`, the default, or `delete`), or remove it with a
-     * null `$endsAt`. Leaves the value and the description alone. Refused `not_found` when the
+     * null `$endsAt` (a `$endKind` with it is refused `invalid_end`, as on a put). Leaves the
+     * value and the description alone. Refused `not_found` when the
      * secret is absent, `ended` when it already expired (renew it with a put and `replace`),
      * `invalid_end` for an end in the past or more than 10 years ahead, and `ends_unsupported`
      * with nothing sent for a bridge below revision 3.
@@ -168,8 +171,9 @@ class MachineSecrets
     public function setEnd(Connection $connection, string $name, ?\DateTimeInterface $endsAt, ?string $endKind = null): array
     {
         $body = ['op' => 'set_end', 'name' => $name, 'ends_at' => self::endOf($endsAt)];
-        if ($endsAt !== null) {
-            $body['end_kind'] = $endKind ?? 'expire';
+        $endKind = $endsAt === null ? $endKind : ($endKind ?? 'expire');
+        if ($endKind !== null) {
+            $body['end_kind'] = $endKind;
         }
 
         return $this->call($connection, $body);
@@ -280,7 +284,9 @@ class MachineSecrets
         $outcome = $ok ? 'ok' : (is_string($answer['code'] ?? null) ? $answer['code'] : 'failed');
         $name = is_string($body['name'] ?? null) ? mb_substr($body['name'], 0, 128) : '';
         $unknown = ($answer['result_unknown'] ?? null) === true;
+        $hasEnd = in_array($body['op'], ['put', 'set_end'], true);
         $endsAt = is_string($body['ends_at'] ?? null) ? $body['ends_at'] : null;
+        $endKind = $endsAt !== null && is_string($body['end_kind'] ?? null) ? $body['end_kind'] : null;
         $replaced = $ok && ($answer['replaced'] ?? null) === true;
         $userId = self::authUserId();
         $durationMs = (int) round((microtime(true) - $started) * 1000);
@@ -297,7 +303,7 @@ class MachineSecrets
                 'result_unknown' => $unknown,
                 'replaced' => $replaced,
                 'duration_ms' => $durationMs,
-            ] + (array_key_exists('ends_at', $body) ? ['ends_at' => $endsAt, 'end_kind' => $endsAt === null ? null : ($body['end_kind'] ?? null)] : []));
+            ] + ($hasEnd ? ['ends_at' => $endsAt, 'end_kind' => $endKind] : []));
         } catch (\Throwable) {
             // A failing log handler is not the caller's problem.
         }
@@ -312,6 +318,8 @@ class MachineSecrets
                 $unknown,
                 $replaced,
                 $durationMs,
+                $endsAt,
+                $endKind,
             );
         } catch (\Throwable $e) {
             try {
