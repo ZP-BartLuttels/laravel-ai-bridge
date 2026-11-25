@@ -1333,7 +1333,7 @@ class BridgeWebSocketServer
      *
      * Body `{op: list|put|describe|remove|set_end, name?, description?, value?, replace?, ends_at?,
      * end_kind?}`, checked by Secrets\SecretRequest (400 `invalid_name` / `invalid_request` /
-     * `invalid_end`). Sends the matching
+     * `invalid_end`, and `end_required` for a replace without the `ends_at` key). Sends the matching
      * `secret_*` frame with a fresh id and answers with the bridge's `secret_result`
      * (`{ok, secrets?, ended?, replaced?, code?, error?}`). Refused without sending anything: 409
      * `machine_secrets_unsupported` for a bridge whose hello had no `machine_secrets` (its

@@ -1339,26 +1339,29 @@ if ($secrets->supported($connection)) {
     //   'ends_at' => null, 'end_kind' => null, 'expired_at' => null]], 'ended' => []]
 
     $secrets->put($connection, 'stripe', $value, 'Live key');          // ['ok' => false, 'code' => 'exists', ...] if it exists
-    $secrets->put($connection, 'stripe', $value, replace: true);       // ['ok' => true, 'replaced' => true]
+    $secrets->put($connection, 'stripe', $value, replace: true, noEnd: true); // ['ok' => true, 'replaced' => true]
+    $secrets->put($connection, 'stripe', $value, replace: true);       // ['ok' => false, 'code' => 'end_required', ...]
     $secrets->describe($connection, 'stripe', 'Rotated in November');
     $secrets->remove($connection, 'stripe');
 }
 
 if ($secrets->supportsEnds($connection)) {
     // Gone entirely one hour from now, sent as UTC (for example 2026-11-24T16:00:00Z).
-    $secrets->put($connection, 'rpa-pass', $value, endsAt: new DateTimeImmutable('+1 hour'), endKind: 'delete');
+    $secrets->put($connection, 'deploy-token', $value, endsAt: new DateTimeImmutable('+1 hour'), endKind: 'delete');
+    // A rotated key states its end again: here a new one, a month ahead.
+    $secrets->put($connection, 'deploy-token', $newValue, replace: true, endsAt: new DateTimeImmutable('+1 month'), endKind: 'delete');
     // Unusable from 1 December, still listed with expired_at (expire is the default kind).
     $secrets->setEnd($connection, 'openai-key', new DateTimeImmutable('2026-12-01T15:00:00Z'));
     $secrets->setEnd($connection, 'openai-key', null);                // no end any more
     $secrets->list($connection);
     // ['ok' => true, 'secrets' => [['name' => 'openai-key', ..., 'ends_at' => null, 'end_kind' => null, 'expired_at' => null]],
-    //  'ended' => [['name' => 'rpa-pass', 'kind' => 'delete', 'ended_at' => '2026-11-24T16:00:00Z']]]
+    //  'ended' => [['name' => 'deploy-token', 'kind' => 'delete', 'ended_at' => '2026-11-24T16:00:00Z']]]
 }
 ```
 
 - Every call answers `['ok' => bool, ...]` and never throws for a refusal. A failure's `code` is
   the machine's (`store_unavailable`, `not_found`, `invalid_name`, `invalid_request`,
-  `invalid_end`, `ended`, `exists`, `timeout`, `failed`) or one decided on the way
+  `invalid_end`, `end_required`, `ended`, `exists`, `timeout`, `failed`) or one decided on the way
   (`machine_secrets_unsupported`, `machine_secrets_outdated`, `ends_unsupported`,
   `not_connected`, `unreachable`, `send_failed`).
 - A put, describe, remove or set_end that may or may not have happened (the machine's store did not
@@ -1373,13 +1376,20 @@ if ($secrets->supportsEnds($connection)) {
   `setEnd($connection, $name, $endsAt, $endKind = null)`, with `endKind` `expire` (the default:
   the value is removed, the entry stays listed with `expired_at` and can be renewed with a put
   and `replace: true`) or `delete` (value and entry removed). The end is sent in UTC with second
-  precision, must be in the future and at most 10 years ahead (`invalid_end`, checked here and on
-  the machine); `setEnd(..., null)` removes it, and a put without an end sets none (a replace
-  clears the old one, so send the end again to keep it). `setEnd()` on an expired secret is
+  precision (sub-seconds rounded up to the next whole second), must be in the future and at most
+  10 years ahead (`invalid_end`, checked here and on the machine); `setEnd(..., null)` removes
+  it, and a first put without an end sets none. `setEnd()` on an expired secret is
   refused `ended`; a kind without an end is refused `invalid_end` on both. `list()` also answers
   `ended`: the ends the machine handled in the last 30 days (`{name, kind, ended_at}`). Check
   `supportsEnds()` first: a put with an end or a `setEnd()` to an older bridge is answered
   `ends_unsupported` and nothing is sent, so the secret never silently outlives its end.
+- **A replace states its end.** `put(..., replace: true)` needs `endsAt:` (the secret ends then)
+  or `noEnd: true` (deliberately none); with neither it is refused `end_required` before anything
+  is sent, with both `invalid_end`. The end given is the end the secret has afterwards: the old
+  one is not kept, so to keep an end, pass it again. This holds for every bridge (a revision 2
+  bridge is sent `ends_at: null` for `noEnd`, which it ignores) and for `POST /api/secrets`,
+  where a replace without the `ends_at` key is answered 400 `end_required`. Why: when a key is
+  rotated, a forgotten argument must not silently turn a short-lived secret into a permanent one.
 - **The value travels as JSON** from your process to the `ai-bridge:serve` process
   (`POST /api/secrets`), then to the bridge, through Laravel's HTTP client. Keep
   `AI_BRIDGE_RELAY_URL` local or https. Anything that records outgoing client requests sees the
@@ -1401,7 +1411,7 @@ if ($secrets->supportsEnds($connection)) {
   set_end, null when none was sent) and writes one info log line `AI Bridge: machine secret
   <op>` with the same fields (`operation`, `connection_id`, `user_id`, `name`, `outcome`,
   `result_unknown`, `replaced`, `duration_ms`, plus `ends_at` and `end_kind` for every put and
-  set_end, null when it sets no end, so a replace that clears an end shows). Neither carries the value or the description. Fired in the process
+  set_end, null when it sets no end, so a replace with no end shows). Neither carries the value or the description. Fired in the process
   that called `AiBridge::secrets()`, with `auth()->id()` there (null in a job or command); listen
   to it to keep your own record of who changed which machine's secrets.
 - `ConnectionStatus::for()` and `GET /ai-bridge/connections` report `machine_secrets` (as the
@@ -1410,7 +1420,7 @@ if ($secrets->supportsEnds($connection)) {
   `ai-bridge.machine_secrets.timeout` (`AI_BRIDGE_MACHINE_SECRETS_TIMEOUT`, 20 s) is how long
   the serve process waits.
 
-See [PROTOCOL.md](PROTOCOL.md#secrets-on-the-machine) and decision 0011.
+See [PROTOCOL.md](PROTOCOL.md#secrets-on-the-machine) and decisions 0011 and 0012.
 
 ### Listening for Tool Calls
 

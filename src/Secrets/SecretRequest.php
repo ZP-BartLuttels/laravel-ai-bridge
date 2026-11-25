@@ -79,13 +79,11 @@ final class SecretRequest
         if (! is_string($endsAt) || preg_match(self::END_PATTERN, $endsAt) !== 1) {
             return 'ends_at must be an ISO 8601 UTC time with a Z suffix, like 2026-12-01T15:00:00Z.';
         }
-        $utc = new \DateTimeZone('UTC');
-        $end = \DateTimeImmutable::createFromFormat('!Y-m-d\\TH:i:s\\Z', $endsAt, $utc);
-        // createFromFormat rolls 2026-02-30 over to March; a round trip catches it.
-        if ($end === false || $end->format('Y-m-d\\TH:i:s\\Z') !== $endsAt) {
+        $end = self::momentOf($endsAt);
+        if ($end === null) {
             return 'ends_at is not a real moment.';
         }
-        $now ??= new \DateTimeImmutable('now', $utc);
+        $now ??= new \DateTimeImmutable('now', new \DateTimeZone('UTC'));
         if ($end <= $now) {
             return 'A secret\'s end must be in the future.';
         }
@@ -94,6 +92,24 @@ final class SecretRequest
         }
 
         return null;
+    }
+
+    /**
+     * `$value` as a moment when it is in the wire form of END_PATTERN and a real date and time
+     * (2026-02-30 is not), or null. Says nothing about whether it is in the future.
+     */
+    public static function momentOf(mixed $value): ?\DateTimeImmutable
+    {
+        if (! is_string($value) || preg_match(self::END_PATTERN, $value) !== 1) {
+            return null;
+        }
+        $moment = \DateTimeImmutable::createFromFormat('!Y-m-d\\TH:i:s\\Z', $value, new \DateTimeZone('UTC'));
+        // createFromFormat rolls 2026-02-30 over to March; a round trip catches it.
+        if ($moment === false || $moment->format('Y-m-d\\TH:i:s\\Z') !== $value) {
+            return null;
+        }
+
+        return $moment;
     }
 
     /** Why `$endKind` is not an end kind, or null when it is. */
@@ -126,7 +142,8 @@ final class SecretRequest
      * The `secret_*` frame (without its `id`) for a request body
      * `{op: list|put|describe|remove|set_end, name?, description?, value?, replace?, ends_at?,
      * end_kind?}`; or, when the request breaks a rule, `{code: invalid_name|invalid_request|
-     * invalid_end, error}` (no `type` key).
+     * invalid_end|end_required, error}` (no `type` key). A put with `replace: true` must carry the
+     * `ends_at` key (a time, or null for no end), else `end_required`.
      *
      * @param  array<string, mixed>  $body
      * @return array<string, mixed>
@@ -192,6 +209,11 @@ final class SecretRequest
             return $refused('replace must be true or false.');
         }
 
+        // A replace states its end: a time, or null for deliberately none. Without the key the
+        // caller may have forgotten it, and a short-lived secret would silently become permanent.
+        if ($replace && ! array_key_exists('ends_at', $body)) {
+            return $refused('A replace must state the secret\'s end: ends_at as a time (with end_kind), or null for no end.', 'end_required');
+        }
         $endsAt = $body['ends_at'] ?? null;
         $endKind = $body['end_kind'] ?? null;
         if (($endsAt === null) !== ($endKind === null)) {
@@ -209,9 +231,12 @@ final class SecretRequest
         if ($replace) {
             $frame['replace'] = true;
         }
+        // On a replace `ends_at` always travels, null included; on a first put only an end.
         if ($endsAt !== null) {
             $frame['ends_at'] = $endsAt;
             $frame['end_kind'] = $endKind;
+        } elseif ($replace) {
+            $frame['ends_at'] = null;
         }
 
         return $frame;

@@ -18,7 +18,7 @@ use Tetrix\AiBridge\WebSocket\BridgeConnectionManager;
 final class SecretFrames
 {
     /** The codes a failed `secret_result` may carry; anything else becomes `failed`. */
-    public const CODES = ['machine_secrets_unsupported', 'store_unavailable', 'not_found', 'invalid_name', 'invalid_request', 'invalid_end', 'ended', 'exists', 'timeout', 'failed'];
+    public const CODES = ['machine_secrets_unsupported', 'store_unavailable', 'not_found', 'invalid_name', 'invalid_request', 'invalid_end', 'end_required', 'ended', 'exists', 'timeout', 'failed'];
 
     /** The most rows one list answer is read for. */
     private const MAX_ROWS = 1000;
@@ -70,7 +70,7 @@ final class SecretFrames
 
     /**
      * Why a bridge that said this at hello must not be sent this frame for its end, or null when
-     * it may: 409 `ends_unsupported` for a `secret_put` carrying `ends_at` or any
+     * it may: 409 `ends_unsupported` for a `secret_put` carrying an end (a time in `ends_at`) or any
      * `secret_set_end` to a bridge below revision 3, which would drop the end and keep the
      * secret forever. Checked after refusalFor(), and again for a held frame.
      *
@@ -98,7 +98,9 @@ final class SecretFrames
     }
 
     /**
-     * Whether this `secret_*` frame needs revision 3: a `secret_set_end`, or a `secret_put` with an end.
+     * Whether this `secret_*` frame needs revision 3: a `secret_set_end`, or a `secret_put` with an
+     * end. A replace's `ends_at: null` (deliberately no end) needs nothing: a bridge below
+     * revision 3 keeps no end anyway.
      *
      * @param  array<string, mixed>  $frame
      */
@@ -107,7 +109,7 @@ final class SecretFrames
         $type = $frame['type'] ?? null;
 
         return $type === MessageTypes::SECRET_SET_END
-            || ($type === MessageTypes::SECRET_PUT && array_key_exists('ends_at', $frame));
+            || ($type === MessageTypes::SECRET_PUT && ($frame['ends_at'] ?? null) !== null);
     }
 
     /** The key a `secret_*` exchange waits under: per bridge, so ids cannot cross users. */
@@ -192,7 +194,7 @@ final class SecretFrames
                 continue;
             }
             $description = $row['description'] ?? null;
-            $endsAt = self::timeOf($row['ends_at'] ?? null);
+            $endsAt = self::endTimeOf($row['ends_at'] ?? null);
             $endKind = self::kindOf($row['end_kind'] ?? null);
             $hasEnd = $endsAt !== null && $endKind !== null;
 
@@ -203,7 +205,7 @@ final class SecretFrames
                 'updated_at' => self::timeOf($row['updated_at'] ?? null),
                 'ends_at' => $hasEnd ? $endsAt : null,
                 'end_kind' => $hasEnd ? $endKind : null,
-                'expired_at' => self::timeOf($row['expired_at'] ?? null),
+                'expired_at' => self::endTimeOf($row['expired_at'] ?? null),
             ];
         }
 
@@ -232,7 +234,7 @@ final class SecretFrames
             $records[] = [
                 'name' => $record['name'],
                 'kind' => $kind,
-                'ended_at' => self::timeOf($record['ended_at'] ?? null),
+                'ended_at' => self::endTimeOf($record['ended_at'] ?? null),
             ];
         }
 
@@ -245,9 +247,19 @@ final class SecretFrames
         return is_array($value) && array_is_list($value) ? array_slice($value, 0, self::MAX_ROWS) : [];
     }
 
+    /** `updated_at`: the bridge's own timestamp (ISO 8601, any precision), kept when short. */
     private static function timeOf(mixed $value): ?string
     {
         return is_string($value) && $value !== '' && strlen($value) <= 64 ? $value : null;
+    }
+
+    /**
+     * `ends_at`, `expired_at`, `ended_at`: an end's moment in the one wire form
+     * (SecretRequest::END_PATTERN, a real date); anything else becomes null.
+     */
+    private static function endTimeOf(mixed $value): ?string
+    {
+        return is_string($value) && SecretRequest::momentOf($value) !== null ? $value : null;
     }
 
     private static function kindOf(mixed $value): ?string

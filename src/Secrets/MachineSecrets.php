@@ -31,7 +31,7 @@ use Tetrix\AiBridge\Upstreams\UpstreamClient;
  *
  * Every method answers an array `{ok: bool, ...}` and never throws for a refusal. On failure
  * `code` is the machine's (`store_unavailable`, `not_found`, `invalid_name`, `invalid_request`,
- * `invalid_end`, `ended`, `exists`, `timeout`, `failed`) or one decided on the way
+ * `invalid_end`, `end_required`, `ended`, `exists`, `timeout`, `failed`) or one decided on the way
  * (`machine_secrets_unsupported`, `machine_secrets_outdated`, `ends_unsupported`,
  * `not_connected`, `unreachable`, `send_failed`). For a put, describe, remove or set_end whose
  * outcome cannot be known (`timeout`, `unreachable`, a bridge that dropped
@@ -113,14 +113,20 @@ class MachineSecrets
      *
      * With `$endsAt` the secret ends then (`$endKind` `expire`, the default, or `delete`); it must
      * be in the future and at most 10 years ahead (`invalid_end`), and a bridge below revision 3
-     * is sent nothing (`ends_unsupported`). Without it the secret has no end: a replace clears
-     * the old one, and an expired secret is renewed.
+     * is sent nothing (`ends_unsupported`). An end with sub-seconds is rounded up to the next
+     * whole second, so it is never earlier than asked.
+     *
+     * A replace must state its end: `$endsAt` (the secret ends then) or `$noEnd: true` (it has
+     * none, deliberately). A replace with neither is refused `end_required` before anything is
+     * sent, so a forgotten argument never makes a short-lived secret permanent; one with both is
+     * refused `invalid_end`. The end given is the end the secret has afterwards: the old one is
+     * not kept, and an expired secret is renewed. A first put without `$endsAt` has no end.
      *
      * @return array{ok: bool, replaced?: bool, code?: string, error?: string, result_unknown?: true}
      */
-    public function put(Connection $connection, string $name, #[\SensitiveParameter] string $value, ?string $description = null, bool $replace = false, ?\DateTimeInterface $endsAt = null, ?string $endKind = null): array
+    public function put(Connection $connection, string $name, #[\SensitiveParameter] string $value, ?string $description = null, bool $replace = false, ?\DateTimeInterface $endsAt = null, ?string $endKind = null, bool $noEnd = false): array
     {
-        $answer = $this->call($connection, array_filter([
+        $body = array_filter([
             'op' => 'put',
             'name' => $name,
             'description' => $description,
@@ -128,7 +134,21 @@ class MachineSecrets
             'replace' => $replace ?: null,
             'ends_at' => self::endOf($endsAt),
             'end_kind' => $endsAt === null ? $endKind : ($endKind ?? 'expire'),
-        ], static fn ($v) => $v !== null));
+        ], static fn ($v) => $v !== null);
+
+        if ($noEnd && $endsAt !== null) {
+            $answer = ['ok' => false, 'code' => 'invalid_end', 'error' => 'Give an end or noEnd: true, not both.'];
+            $this->audit($connection, $body, $answer, microtime(true));
+
+            return $answer;
+        }
+        // An explicit "no end" travels as `ends_at: null`; a replace without either choice is
+        // left without the key, and SecretRequest refuses it `end_required`.
+        if ($noEnd) {
+            $body['ends_at'] = null;
+        }
+
+        $answer = $this->call($connection, $body);
 
         // Whatever the machine or anything on the way said, it does not repeat the value.
         if (is_string($answer['error'] ?? null) && $value !== '') {
@@ -166,6 +186,8 @@ class MachineSecrets
      * `invalid_end` for an end in the past or more than 10 years ahead, and `ends_unsupported`
      * with nothing sent for a bridge below revision 3.
      *
+     * An end with sub-seconds is rounded up to the next whole second.
+     *
      * @return array{ok: bool, code?: string, error?: string, result_unknown?: true}
      */
     public function setEnd(Connection $connection, string $name, ?\DateTimeInterface $endsAt, ?string $endKind = null): array
@@ -179,12 +201,22 @@ class MachineSecrets
         return $this->call($connection, $body);
     }
 
-    /** An end as it travels: UTC, second precision, `Z` suffix. */
+    /**
+     * An end as it travels: UTC, second precision, `Z` suffix. Sub-seconds are rounded up to the
+     * next whole second: cutting them off could turn `+1 second` into now, which is refused
+     * `invalid_end`, and an end is never earlier than the caller asked.
+     */
     private static function endOf(?\DateTimeInterface $endsAt): ?string
     {
-        return $endsAt === null ? null : \DateTimeImmutable::createFromInterface($endsAt)
-            ->setTimezone(new \DateTimeZone('UTC'))
-            ->format('Y-m-d\\TH:i:s\\Z');
+        if ($endsAt === null) {
+            return null;
+        }
+        $utc = \DateTimeImmutable::createFromInterface($endsAt)->setTimezone(new \DateTimeZone('UTC'));
+        if ((int) $utc->format('u') !== 0) {
+            $utc = $utc->setTimestamp($utc->getTimestamp() + 1);
+        }
+
+        return $utc->format('Y-m-d\\TH:i:s\\Z');
     }
 
     /**
