@@ -2103,7 +2103,7 @@ that has not finished after 15 s is answered `timeout`. A value only ever travel
 | `secret_put` | `{id, name, description?, value, replace?, ends_at?, end_kind?}` (revision 3: `ends_at` required, a time or `null`, when `replace` is `true`) |
 | `secret_describe` | `{id, name, description}` |
 | `secret_remove` | `{id, name}` |
-| `secret_set_end` | `{id, name, ends_at, end_kind?}` (revision 3; `end_kind` required when `ends_at` is a time, omitted with `ends_at: null`) |
+| `secret_set_end` | `{id, name, ends_at, end_kind?}` (revision 3; `end_kind` required when `ends_at` is a time, omitted with `ends_at: null`: a server never sends it there, and this package refuses one `invalid_end`) |
 
 - `name`: 1 to 64 characters `[A-Za-z0-9._-]`, starting with a letter or digit, never `..`, no
   trailing newline, never `index.json` in any case (the package matches
@@ -2140,9 +2140,9 @@ that has not finished after 15 s is answered `timeout`. A value only ever travel
 ```json
 {"type": "secret_put", "id": "sec-…", "name": "deploy-token", "value": "…", "ends_at": "2026-11-24T17:00:00Z", "end_kind": "delete"}
 {"type": "secret_put", "id": "sec-…", "name": "deploy-token", "value": "…", "replace": true, "ends_at": "2026-12-24T17:00:00Z", "end_kind": "delete"}
-{"type": "secret_put", "id": "sec-…", "name": "github-token", "value": "…", "replace": true, "ends_at": null}
-{"type": "secret_set_end", "id": "sec-…", "name": "openai-key", "ends_at": "2026-12-01T15:00:00Z", "end_kind": "expire"}
-{"type": "secret_set_end", "id": "sec-…", "name": "openai-key", "ends_at": null}
+{"type": "secret_put", "id": "sec-…", "name": "ci-token", "value": "…", "replace": true, "ends_at": null}
+{"type": "secret_set_end", "id": "sec-…", "name": "api-key", "ends_at": "2026-12-01T15:00:00Z", "end_kind": "expire"}
+{"type": "secret_set_end", "id": "sec-…", "name": "api-key", "ends_at": null}
 ```
 
 At `ends_at` the bridge ends the secret, checking before every read of its store, at start and
@@ -2164,8 +2164,8 @@ wire form above (`updated_at` is the bridge's own timestamp and only kept when s
 
 ```json
 {"type": "secret_result", "id": "sec-…", "ok": true, "secrets": [
-  {"name": "github-token", "description": "…", "updated_at": "…", "ends_at": null, "end_kind": null, "expired_at": null},
-  {"name": "openai-key", "description": "…", "updated_at": "…", "ends_at": "2026-12-01T15:00:00Z", "end_kind": "expire", "expired_at": "2026-12-01T15:00:00Z"}
+  {"name": "ci-token", "description": "…", "updated_at": "…", "ends_at": null, "end_kind": null, "expired_at": null},
+  {"name": "api-key", "description": "…", "updated_at": "…", "ends_at": "2026-12-01T15:00:00Z", "end_kind": "expire", "expired_at": "2026-12-01T15:00:00Z"}
 ], "ended": [{"name": "deploy-token", "kind": "delete", "ended_at": "2026-11-24T17:00:00Z"}]}
 ```
 

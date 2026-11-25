@@ -1351,10 +1351,10 @@ if ($secrets->supportsEnds($connection)) {
     // A rotated key states its end again: here a new one, a month ahead.
     $secrets->put($connection, 'deploy-token', $newValue, replace: true, endsAt: new DateTimeImmutable('+1 month'), endKind: 'delete');
     // Unusable from 1 December, still listed with expired_at (expire is the default kind).
-    $secrets->setEnd($connection, 'openai-key', new DateTimeImmutable('2026-12-01T15:00:00Z'));
-    $secrets->setEnd($connection, 'openai-key', null);                // no end any more
+    $secrets->setEnd($connection, 'api-key', new DateTimeImmutable('2026-12-01T15:00:00Z'));
+    $secrets->setEnd($connection, 'api-key', null);                // no end any more
     $secrets->list($connection);
-    // ['ok' => true, 'secrets' => [['name' => 'openai-key', ..., 'ends_at' => null, 'end_kind' => null, 'expired_at' => null]],
+    // ['ok' => true, 'secrets' => [['name' => 'api-key', ..., 'ends_at' => null, 'end_kind' => null, 'expired_at' => null]],
     //  'ended' => [['name' => 'deploy-token', 'kind' => 'delete', 'ended_at' => '2026-11-24T16:00:00Z']]]
 }
 ```
